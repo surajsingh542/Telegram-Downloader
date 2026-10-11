@@ -43,7 +43,7 @@ api_hash=YOUR_API_HASH
 
 1. Run the application:
 ```bash
-node downloader.js
+npm run start
 ```
 
 2. Follow the prompts:
