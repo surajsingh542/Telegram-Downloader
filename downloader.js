@@ -3,15 +3,13 @@ const MTProto = require('@mtproto/core');
 const readline = require('readline');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 
-let downloadsFolderPath = path.join(__dirname,"./downloads")
+let downloadsFolderPath = path.join(__dirname, "./downloads");
 
 // check if downloads directory exists, otherwise create it
-if(!fs.existsSync(downloadsFolderPath)){
+if (!fs.existsSync(downloadsFolderPath)) {
 	fs.mkdirSync(downloadsFolderPath);
 }
-
 
 // Initialize MTProto
 const mtproto = new MTProto({
@@ -44,7 +42,6 @@ const callApi = async (method, params) => {
 	}
 };
 
-
 // Read input from the user
 const readInput = (question) => {
 	const rl = readline.createInterface({
@@ -56,76 +53,6 @@ const readInput = (question) => {
 		rl.close();
 		resolve(answer);
 	}));
-};
-
-// Generate SHA-256 hash
-const sha256 = (data) => crypto.createHash('sha256').update(data).digest();
-
-// Helper functions for SRP authentication
-const bigIntFromBytes = (bytes) => {
-	let result = 0n;
-	for (let i = 0; i < bytes.length; i++) {
-		result = (result << 8n) | BigInt(bytes[i]);
-	}
-	return result;
-};
-
-const bytesFromBigInt = (bigInt, length) => {
-	const bytes = new Uint8Array(length);
-	for (let i = length - 1; i >= 0; i--) {
-		bytes[i] = Number(bigInt & 0xFFn);
-		bigInt >>= 8n;
-	}
-	return bytes;
-};
-
-const modPow = (base, exponent, modulus) => {
-	let result = 1n;
-	base = base % modulus;
-	while (exponent > 0n) {
-		if (exponent % 2n === 1n) {
-			result = (result * base) % modulus;
-		}
-		exponent = exponent >> 1n;
-		base = (base * base) % modulus;
-	}
-	return result;
-};
-
-const computeSRPAuth = (password, passwordInfo) => {
-	const { srp_id, current_algo } = passwordInfo;
-	const { g, p, salt1, salt2 } = current_algo;
-	
-	// Convert buffers to BigInt
-	const gBigInt = bigIntFromBytes(g);
-	const pBigInt = bigIntFromBytes(p);
-	
-	// Compute password hash
-	const salt1Buffer = Buffer.from(salt1);
-	const salt2Buffer = Buffer.from(salt2);
-	const passwordBuffer = Buffer.from(password, 'utf8');
-	
-	const hash1 = sha256(Buffer.concat([salt1Buffer, passwordBuffer, salt1Buffer]));
-	const hash2 = sha256(Buffer.concat([salt2Buffer, hash1, salt2Buffer]));
-	const x = bigIntFromBytes(hash2);
-	
-	// Generate random a (256 bits)
-	const a = bigIntFromBytes(crypto.randomBytes(32));
-	
-	// Compute A = g^a mod p
-	const A = modPow(gBigInt, a, pBigInt);
-	
-	// For this simplified implementation, we'll use a basic approach
-	// In a real implementation, you'd need the server's B value and complete the SRP protocol
-	const ABytes = bytesFromBigInt(A, 256);
-	
-	// Create a simple M1 for demonstration (this is not the complete SRP protocol)
-	const M1 = sha256(Buffer.concat([Buffer.from(ABytes), Buffer.from(p), Buffer.from(g)]));
-	
-	return {
-		A: Buffer.from(ABytes),
-		M1: M1
-	};
 };
 
 // Login implementation
@@ -162,15 +89,28 @@ const login = async () => {
 		} catch (error) {
 			if (error.error_message === 'SESSION_PASSWORD_NEEDED') {
 				const password = await readInput("2FA is enabled. Enter your password: ");
-				const passwordInfo = await callApi('account.getPassword');
-				console.log("passwordInfo", passwordInfo);
 				
-				const { A, M1 } = computeSRPAuth(password, passwordInfo);
+				// 1. Fetch current 2FA password settings from Telegram
+				const passwordInfo = await callApi('account.getPassword');
+				
+				const { srp_id, current_algo, srp_B } = passwordInfo;
+				const { g, p, salt1, salt2 } = current_algo;
+				
+				// 2. Use MTProto's native crypto module to generate correct A and M1 values
+				const { A, M1 } = await mtproto.crypto.getSRPParams({
+					g,
+					p,
+					salt1,
+					salt2,
+					gB: srp_B,
+					password,
+				});
 
+				// 3. Submit calculated challenges back to the server
 				const checkPasswordResult = await callApi('auth.checkPassword', {
 					password: {
 						_: 'inputCheckPasswordSRP',
-						srp_id: passwordInfo.srp_id,
+						srp_id: srp_id,
 						A: A,
 						M1: M1,
 					},
