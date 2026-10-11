@@ -129,7 +129,7 @@ const login = async () => {
 // Fetch files from the channel
 const fetchFilesFromChannel = async (channelLink) => {
 	try {
-		const username = channelLink.replace('https://t.me', '').split('/')[0];
+		const username = channelLink.replace('https://t.me/', '');
 		const updates = await callApi('contacts.resolveUsername', { username });
 
 		const channel = updates.chats[0];
@@ -184,22 +184,115 @@ const fetchFilesFromChannel = async (channelLink) => {
 	}
 };
 
+// Global tracking object for rolling speeds (place this outside your functions)
+const speedTracker = {
+	history: [], // Stores snapshots of { timestamp, bytes }
+	windowMs: 5000 // Look back at the last 5 seconds of activity
+};
+
+const drawProgressBar = (fileName, currentBytes, totalBytes, startTime) => {
+	const percentage = totalBytes > 0 ? Math.min(100, Math.floor((currentBytes / totalBytes) * 100)) : 0;
+	
+	const barWidth = 15; 
+	const filledWidth = Math.round((percentage / 100) * barWidth);
+	const bar = '█'.repeat(filledWidth) + '░'.repeat(barWidth - filledWidth);
+	
+	const currentMB = (currentBytes / (1024 * 1024)).toFixed(1);
+	const totalMB = (totalBytes / (1024 * 1024)).toFixed(1);
+
+	// 1. Record the current progress snapshot
+	const now = Date.now();
+	speedTracker.history.push({ timestamp: now, bytes: currentBytes });
+
+	// 2. Clear out snapshots older than 5 seconds to keep the window moving
+	const cutoff = now - speedTracker.windowMs;
+	while (speedTracker.history.length > 0 && speedTracker.history[0].timestamp < cutoff) {
+		speedTracker.history.shift();
+	}
+
+	let speedText = "0.0 MB/s";
+	let etaText = "--:--";
+
+	// 3. Calculate speed based ONLY on the 5-second window
+	if (speedTracker.history.length > 1) {
+		const oldest = speedTracker.history[0];
+		const newest = speedTracker.history[speedTracker.history.length - 1];
+		
+		const timeDifferenceSec = (newest.timestamp - oldest.timestamp) / 1000;
+		const bytesDifference = newest.bytes - oldest.bytes;
+
+		if (timeDifferenceSec > 0.2 && bytesDifference > 0) {
+			const bytesPerSecond = bytesDifference / timeDifferenceSec;
+			const mbPerSecond = bytesPerSecond / (1024 * 1024);
+			speedText = `${mbPerSecond.toFixed(1)} MB/s`;
+
+			// Calculate a highly realistic ETA based on active performance
+			const remainingBytes = totalBytes - currentBytes;
+			if (remainingBytes > 0) {
+				const remainingSeconds = remainingBytes / bytesPerSecond;
+				const mins = Math.floor(remainingSeconds / 60);
+				const secs = Math.floor(remainingSeconds % 60).toString().padStart(2, '0');
+				etaText = `${mins}:${secs}`;
+			} else {
+				etaText = "00:00";
+			}
+		}
+	}
+
+	// Truncate long filenames cleanly
+	const maxNameLength = 50;
+	const shortName = fileName.length > maxNameLength 
+		? fileName.substring(0, maxNameLength - 3) + '...' 
+		: fileName;
+
+	// Render layout clearly in a single compressed line string
+	process.stdout.clearLine(0);
+	process.stdout.cursorTo(0);
+	process.stdout.write(`DL: ${shortName} [${bar}] ${percentage}% (${currentMB}/${totalMB}MB) | ${speedText} | ETA: ${etaText}`);
+};
+
+
+
 // Download a specific file
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const downloadFile = async (fileId, accessHash, fileReference, fileName, dcId = null) => {
-	const fileStream = fs.createWriteStream(path.join(downloadsFolderPath, fileName));
+const downloadFile = async (fileId, accessHash, fileReference, fileName, totalSize, dcId = null, startTime = null) => {
+	const filePath = path.join(downloadsFolderPath, fileName);
 	let offset = 0;
-	
-	// Telegram chunk limits: Must be a multiple of 4KB. Max 1MB (1024 * 1024) for big files.
 	const chunkSize = 512 * 1024; 
 
-	console.log(`Starting Download for: ${fileName}`);
+	// 1. AUTO-RESUME CHECK: Inspect local disk for partial fragments
+	if (fs.existsSync(filePath)) {
+		const stat = fs.statSync(filePath);
+		
+		if (stat.size >= totalSize) {
+			console.log(`\n[Skipped] ${fileName} already fully downloaded.`);
+			return;
+		}
+		
+		// Align Telegram's chunks (must be a multiple of 4KB). 
+		// If a previous chunk broke mid-transit, roll back to the nearest safe chunk boundary.
+		offset = Math.floor(stat.size / (4 * 1024)) * (4 * 1024);
+		console.log(`\n[Resuming] Found partial file. Resuming from offset: ${(offset / (1024 * 1024)).toFixed(2)} MB`);
+	}
+
+	// ONLY wipe history on a brand-new file initialization (not on DC migration reroutes)
+	if (!dcId) {
+		speedTracker.history = []; 
+	}
+
+	// 2. Open Stream in Append Mode ('a') so it doesn't overwrite existing progress
+	const fileStream = fs.createWriteStream(filePath, { flags: 'a', start: offset });
+
+	if (!startTime) {
+		startTime = Date.now();
+	}
+
+	drawProgressBar(fileName, offset, totalSize, startTime);
 
 	try {
 		while (true) {
 			try {
-				// Call API directly on mtproto or use custom DC option object if dcId is provided
 				const data = await mtproto.call('upload.getFile', {
 					location: {
 						_: 'inputDocumentFileLocation',
@@ -209,30 +302,35 @@ const downloadFile = async (fileId, accessHash, fileReference, fileName, dcId = 
 					},
 					offset,
 					limit: chunkSize,
-				}, dcId ? { dcId } : {}); // Pass specific target DC option override if migrating
+				}, dcId ? { dcId } : {});
 
 				if (!data || !data.bytes || data.bytes.length === 0) {
-					console.log(`Finished downloading: ${fileName}`);
+					drawProgressBar(fileName, totalSize, totalSize, startTime); 
+					console.log(`\nFinished downloading: ${fileName}`);
 					break;
 				}
 
 				fileStream.write(Buffer.from(data.bytes));
-				offset += data.bytes.length; // Dynamically increment by actual bytes received
+				offset += data.bytes.length; 
+
+				drawProgressBar(fileName, offset, totalSize, startTime);
+
 			} catch (error) {
 				if (error.error_message && error.error_message.startsWith('FLOOD_WAIT_')) {
-					const waitTime = parseInt(error.error_message.split('_')[2], 10);
-					console.log(`Flood wait detected. Sleeping for ${waitTime} seconds...`);
+					const waitTime = parseInt(error.error_message.split('_').pop(), 10);
+					console.log(`\nFlood wait detected. Sleeping for ${waitTime} seconds...`);
 					await sleep(waitTime * 1000);
-					// Retry happens seamlessly because loop does not increment offset yet
+					startTime += (waitTime * 1000); // Adjust ETA clock
 				} else if (error.error_message && error.error_message.startsWith('FILE_MIGRATE_')) {
-					const newDcId = parseInt(error.error_message.split('_')[2], 10);
-					console.log(`File is in data center ${newDcId}. Re-routing request...`);
+					const newDcId = parseInt(error.error_message.split('_').pop(), 10);
+					console.log(`\nFile is in data center ${newDcId}. Re-routing request...`);
 					
-					// Close stream to cleanly wipe/restart download on the correct target DC
-					fileStream.end(); 
-					return downloadFile(fileId, accessHash, fileReference, fileName, newDcId);
+					fileStream.end();
+					// Carry the metrics over to the target DC instance safely
+					return downloadFile(fileId, accessHash, fileReference, fileName, totalSize, newDcId, startTime);
 				} else if (error.error_message === 'OFFSET_INVALID') {
-					console.log('Finished stream boundaries (OFFSET_INVALID).');
+					drawProgressBar(fileName, totalSize, totalSize, startTime);
+					console.log('\nFinished stream boundaries (OFFSET_INVALID).');
 					break;
 				} else {
 					throw error;
@@ -240,16 +338,17 @@ const downloadFile = async (fileId, accessHash, fileReference, fileName, dcId = 
 			}
 		}
 	} catch (error) {
-		console.error(`Fatal failure during file download (${fileName}):`, error);
+		console.error(`\nFatal failure during file download (${fileName}):`, error);
 	} finally {
 		fileStream.end();
 	}
 };
 
-// Main function
-const main = async () => {
-	await login();
 
+// Add this below your login validation step
+const startDownloader = async () => {
+    await login(); // Authenticate first
+    
 	const channelLink = await readInput("Enter the telegram channel link: ");
 
 	const files = await fetchFilesFromChannel(channelLink);
@@ -258,21 +357,24 @@ const main = async () => {
 		console.log('No files found in the channel.');
 		return;
 	}
-
-	for (let i = 0; i < files.length; i++) {
-		const file = files[i];
-		const fileReference = file.file_reference;
-		let fileName = file.attributes.find((attr) => attr._ === 'documentAttributeFilename').file_name;
-		fileName = `(${i}) ${fileName}`;
-		await downloadFile(file.id, file.access_hash, fileReference, fileName);
+    
+    console.log(`Starting batch download of ${files.length} files sequentially...`);
+    let i=1;
+	for (const file of files) {
+		await downloadFile(file.id, file.access_hash, file.file_reference, `(${i}) ${file.name}`, file.size);
+		i++;
+		console.log(`--- Pausing briefly before starting next file ---`);
+		await sleep(1000); 
 	}
 
+    console.log("All downloads completed successfully!");
 };
 
 // Call the main function
-main().then(() => {
+startDownloader().then(() => {
 	console.log("DONE========================>")
 	process.exit(0)
 }).catch((error) => {
 	console.log("Error CAUGHT==================+>", error)
+	process.exit(1)
 })
