@@ -129,9 +129,8 @@ const login = async () => {
 // Fetch files from the channel
 const fetchFilesFromChannel = async (channelLink) => {
 	try {
-		const updates = await callApi('contacts.resolveUsername', {
-			username: channelLink.replace('https://t.me/', ''),
-		});
+		const username = channelLink.replace('https://t.me', '').split('/')[0];
+		const updates = await callApi('contacts.resolveUsername', { username });
 
 		const channel = updates.chats[0];
 		const channelId = channel.id;
@@ -143,7 +142,7 @@ const fetchFilesFromChannel = async (channelLink) => {
 		let files = [];
 
 		while (true) {
-			const { messages } = await callApi('messages.getHistory', {
+			const history = await callApi('messages.getHistory', {
 				peer: {
 					_: 'inputPeerChannel',
 					channel_id: channelId,
@@ -153,10 +152,24 @@ const fetchFilesFromChannel = async (channelLink) => {
 				limit,
 			});
 
+			const messages = history.messages;
+			if (!messages || messages.length === 0) break;
+
 			files.push(
 				...messages
 					.filter((msg) => msg.media && msg.media.document)
-					.map((msg) => msg.media.document)
+					.map((msg) => {
+						// Extract filename if available from attributes
+						const fileAttributes = msg.media.document.attributes || [];
+						const nameAttr = fileAttributes.find(attr => attr._ === 'documentAttributeFilename');
+						return {
+							id: msg.media.document.id,
+							access_hash: msg.media.document.access_hash,
+							file_reference: msg.media.document.file_reference,
+							size: msg.media.document.size,
+							name: nameAttr ? nameAttr.file_name : `file_${msg.media.document.id}`
+						};
+					})
 			);
 
 			if (messages.length < limit) break;
@@ -164,25 +177,29 @@ const fetchFilesFromChannel = async (channelLink) => {
 		}
 
 		console.log(`Found ${files.length} files in the channel.`);
-		files = files.reverse();
-		return files;
+		return files.reverse();
 	} catch (error) {
 		console.error('Error fetching files:', error);
+		return [];
 	}
 };
 
 // Download a specific file
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const downloadFile = async (fileId, accessHash, fileReference, fileName) => {
-	try {
-		console.log(`Downloading File: ${fileName}`);
-		const fileStream = fs.createWriteStream(path.join(__dirname, 'downloads', fileName));
-		let offset = 0;
-		const chunkSize = 1024 * 1024; // 1 MB
+const downloadFile = async (fileId, accessHash, fileReference, fileName, dcId = null) => {
+	const fileStream = fs.createWriteStream(path.join(downloadsFolderPath, fileName));
+	let offset = 0;
+	
+	// Telegram chunk limits: Must be a multiple of 4KB. Max 1MB (1024 * 1024) for big files.
+	const chunkSize = 512 * 1024; 
 
+	console.log(`Starting Download for: ${fileName}`);
+
+	try {
 		while (true) {
 			try {
+				// Call API directly on mtproto or use custom DC option object if dcId is provided
 				const data = await mtproto.call('upload.getFile', {
 					location: {
 						_: 'inputDocumentFileLocation',
@@ -192,43 +209,42 @@ const downloadFile = async (fileId, accessHash, fileReference, fileName) => {
 					},
 					offset,
 					limit: chunkSize,
-				});
+				}, dcId ? { dcId } : {}); // Pass specific target DC option override if migrating
 
-				if (!data.bytes || data.bytes.length === 0) {
-					console.log('No more data to download');
+				if (!data || !data.bytes || data.bytes.length === 0) {
+					console.log(`Finished downloading: ${fileName}`);
 					break;
 				}
 
 				fileStream.write(Buffer.from(data.bytes));
-				offset += chunkSize;
+				offset += data.bytes.length; // Dynamically increment by actual bytes received
 			} catch (error) {
 				if (error.error_message && error.error_message.startsWith('FLOOD_WAIT_')) {
 					const waitTime = parseInt(error.error_message.split('_')[2], 10);
-					console.log(`Flood wait error. Retrying after ${waitTime} seconds...`);
+					console.log(`Flood wait detected. Sleeping for ${waitTime} seconds...`);
 					await sleep(waitTime * 1000);
+					// Retry happens seamlessly because loop does not increment offset yet
 				} else if (error.error_message && error.error_message.startsWith('FILE_MIGRATE_')) {
-					const dcId = parseInt(error.error_message.split('_')[2], 10);
-					console.log(`File is located in data center ${dcId}. Switching...`);
-					mtproto.setDefaultDc(dcId); // Switching to the correct DC
+					const newDcId = parseInt(error.error_message.split('_')[2], 10);
+					console.log(`File is in data center ${newDcId}. Re-routing request...`);
+					
+					// Close stream to cleanly wipe/restart download on the correct target DC
+					fileStream.end(); 
+					return downloadFile(fileId, accessHash, fileReference, fileName, newDcId);
 				} else if (error.error_message === 'OFFSET_INVALID') {
-					console.log('Invalid offset, resetting offset...', offset, "File Name====>", fileName);
+					console.log('Finished stream boundaries (OFFSET_INVALID).');
 					break;
 				} else {
-					throw error; // Rethrow non-FLOOD_WAIT and non-FILE_MIGRATE errors
+					throw error;
 				}
 			}
 		}
-
-		fileStream.end();
-		console.log(`File downloaded: ${fileName}`);
 	} catch (error) {
-		console.error('Error downloading file:', error);
+		console.error(`Fatal failure during file download (${fileName}):`, error);
+	} finally {
+		fileStream.end();
 	}
 };
-
-
-
-
 
 // Main function
 const main = async () => {
