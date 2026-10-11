@@ -81,7 +81,11 @@ npm run start
 
 ```
 telegram-downloader/
-├── downloader.js          # Main application file
+├── index.js          # Main application file
+├── downloader.js          # Conatining file fetching and download functions
+├── helper.js          # Consists of helper utility functions
+├── login.js          # Telegram user login and session management
+├── mtProto.js          # The mtProto client for telegram api's
 ├── .env                   # Environment variables (create this)
 ├── session.json          # Authentication session (auto-generated)
 ├── downloads/            # Downloaded files folder (auto-created)

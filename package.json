@@ -2,14 +2,14 @@
   "name": "telegram-downloader",
   "version": "1.0.0",
   "description": "A Node.js application that downloads files from Telegram channels using the MTProto API. This tool can fetch and download all media files from a specified Telegram channel.",
-  "main": "downloader.js",
+  "main": "index.js",
   "dependencies": {
     "@mtproto/core": "^6.3.0",
     "dotenv": "^17.2.1"
   },
   "devDependencies": {},
   "scripts": {
-    "start": "node downloader.js"
+    "start": "node index.js"
   },
   "repository": {
     "type": "git",
@@ -18,5 +18,5 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "module"
 }
