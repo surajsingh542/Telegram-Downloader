@@ -1,4 +1,5 @@
 import MTProto from '@mtproto/core';
+import './mtprotoPatches.js'; // native crypto + fast framing, see mtprotoPatches.js
 import path from 'node:path'
 
 // Initialize MTProto

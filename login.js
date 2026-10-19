@@ -8,7 +8,9 @@ const login = async () => {
 		const user = await callApi('users.getFullUser', {
 			id: { _: 'inputUserSelf' },
 		});
-		console.log("Already logged in:", user);
+		const self = user.users?.[0];
+		const displayName = [self?.first_name, self?.last_name].filter(Boolean).join(' ') || self?.username || 'unknown user';
+		console.info(`Already logged in as ${displayName}${self?.username ? ` (@${self.username})` : ''}.`);
 		return;
 	} catch (error) {
 		if (error.error_message !== 'AUTH_KEY_UNREGISTERED') {

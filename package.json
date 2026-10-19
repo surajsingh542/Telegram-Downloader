@@ -4,12 +4,13 @@
   "description": "A Node.js application that downloads files from Telegram channels using the MTProto API. This tool can fetch and download all media files from a specified Telegram channel.",
   "main": "index.js",
   "dependencies": {
-    "@mtproto/core": "^6.3.0",
+    "@inquirer/checkbox": "5.2.6",
+    "@mtproto/core": "6.3.0",
     "dotenv": "^17.2.1"
   },
-  "devDependencies": {},
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
@@ -18,5 +19,8 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=20.17"
+  }
 }

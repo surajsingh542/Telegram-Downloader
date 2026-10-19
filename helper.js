@@ -21,22 +21,51 @@ export const callApi = async (method, params) => {
 			mtproto.setDefaultDc(dcId); // Switch to the correct DC
 			return callApi(method, params); // Retry the API call
 		}
+		if (error.error_message?.startsWith('FLOOD_WAIT_') || error.error_message?.startsWith('FLOOD_PREMIUM_WAIT_')) {
+			const waitTime = parseInt(error.error_message.split('_').pop(), 10);
+			console.info(`\nRate limited by Telegram. Waiting ${waitTime} seconds before retrying ${method}...`);
+			await sleep(waitTime * 1000);
+			return callApi(method, params);
+		}
 		console.error(`Error calling ${method}:`, error);
 		throw error;
 	}
 };
 
 // Read input from the user
-export const readInput = (question) => {
-	const rl = readline.createInterface({
-		input: process.stdin,
-		output: process.stdout,
-	});
+// One shared interface for the whole session; its async iterator buffers lines so typed-ahead
+// or piped input is never lost between prompts.
+let inputInterface = null;
+let inputLines = null;
 
-	return new Promise((resolve) => rl.question(question, (answer) => {
-		rl.close();
-		resolve(answer);
-	}));
+// Detaches the shared interface so another prompt (e.g. the checkbox selector) can own the terminal.
+// The next readInput call creates a fresh one.
+export const releaseInput = () => {
+	const rl = inputInterface;
+	inputInterface = null;
+	inputLines = null;
+	rl?.close();
+};
+
+export const readInput = async (question) => {
+	if (!inputLines) {
+		inputInterface = readline.createInterface({ input: process.stdin, output: process.stdout });
+		inputLines = inputInterface[Symbol.asyncIterator]();
+	}
+
+	// Let readline own the question: it redraws the prompt on some keys (Ctrl+U / Cmd+Backspace, history,
+	// resizing), and would otherwise replace the question with its default "> ".
+	inputInterface.setPrompt(question);
+	inputInterface.prompt();
+	const { value, done } = await inputLines.next();
+	// Keys pressed later (e.g. Enter during a download) must not redraw an old question.
+	inputInterface?.setPrompt('');
+
+	if (done) {
+		console.info('\nInput closed. Exiting.');
+		process.exit(0);
+	}
+	return value;
 };
 
 export const drawProgressBar = (fileName, currentBytes, totalBytes, startTime) => {
@@ -93,6 +122,9 @@ export const drawProgressBar = (fileName, currentBytes, totalBytes, startTime) =
 	const shortName = fileName.length > maxNameLength
 		? fileName.substring(0, maxNameLength - 3) + '...'
 		: fileName;
+
+	// In-place redraws only work on a real terminal (not when output is piped or redirected)
+	if (!process.stdout.isTTY) return;
 
 	// Render layout clearly in a single compressed line string
 	process.stdout.clearLine(0);
